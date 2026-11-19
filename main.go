@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/rand"
 	"fmt"
-	"math"
 	"math/big"
 )
 
@@ -20,8 +19,8 @@ type EncryptedMessage struct {
 }
 
 type Key struct {
-	n uint64
-	d uint64
+	n *big.Int
+	d *big.Int
 }
 
 type Person struct {
@@ -29,16 +28,16 @@ type Person struct {
 	message          string
 	messagesReceived []EncryptedMessage
 	key              Key
-	pubKeys          map[string]uint64
+	pubKeys          map[string]*big.Int
 }
 
 const e = 65537
 
-func (p Person) transmitPublicKey() uint64 {
+func (p Person) transmitPublicKey() *big.Int {
 	return p.key.n
 }
 
-func generatePrimePair(bitSize int, difference int) (uint64, uint64) {
+func generatePrimePair(bitSize int, difference uint64) (*big.Int, *big.Int) {
 	p, err := rand.Prime(rand.Reader, bitSize)
 	if err != nil {
 		panic(err)
@@ -49,92 +48,59 @@ func generatePrimePair(bitSize int, difference int) (uint64, uint64) {
 		if err != nil {
 			panic(err)
 		}
-		if math.Abs(float64(p.Int64()-q.Int64())) > float64(difference) {
-			return p.Uint64(), q.Uint64()
+		if new(big.Int).Abs(new(big.Int).Sub(p, q)).Cmp(new(big.Int).SetUint64(difference)) > 0 {
+			return p, q
 		}
 	}
 }
 
-// euclidean algorithm: https://en.wikipedia.org/wiki/Euclidean_algorithm
-// finds greatest common divisor of a and b
-func gcd(a, b uint64) uint64 {
-	for b != 0 {
-		t := b
-		b = a % b
-		a = t
-	}
-	return a
+func gcd(a, b *big.Int) *big.Int {
+	return new(big.Int).GCD(nil, nil, a, b)
 }
 
-// least common multiple (lcm): https://en.wikipedia.org/wiki/Least_common_multiple
-// smallest number that is divisible by both a and b
-func lcm(a, b uint64) uint64 {
-	assert(a != 0 && b != 0, "Division by zero is not allowed")
-	return uint64(math.Abs(float64(a)) * (math.Abs(float64(b)) / float64(gcd(a, b))))
+func lcm(a, b *big.Int) *big.Int {
+	assert(a.Sign() != 0 && b.Sign() != 0, "Division by zero is not allowed")
+
+	g := gcd(a, b)
+	result := new(big.Int).Mul(a, b)
+	return result.Div(result, g)
 }
 
-// extended euclidian algorithm: https://en.wikipedia.org/wiki/Extended_Euclidean_algorithm
-func extendedGcd(a, b uint64) uint64 {
-	// (x * a + b * y = 1)
-	//
-	// function extended_gcd(a, b)
-	//     (old_r, r) := (a, b)
-	//     (old_s, s) := (1, 0)
-	//     (old_t, t) := (0, 1)
-	//
-	//     while r ≠ 0 do
-	//         quotient := old_r div r
-	//         (old_r, r) := (r, old_r − quotient × r)
-	//         (old_s, s) := (s, old_s − quotient × s)
-	//         (old_t, t) := (t, old_t − quotient × t)
-	//
-	//     output "Bézout coefficients:", (old_s, old_t)
-	//     output "greatest common divisor:", old_r
-	//     output "quotients by the gcd:", (t, s)
+func extendedGcd(a, b *big.Int) *big.Int {
+	x := new(big.Int)
+	g := new(big.Int)
 
-	oldR, r := int64(a), int64(b)
-	oldS, s := int64(1), int64(0)
-	// oldT, t := int64(0), int64(1)
+	g.GCD(x, nil, a, b)
 
-	for r != 0 {
-		quotient := int64(math.Floor(float64(oldR / r)))
-		oldR, r = r, oldR-quotient*r
-		oldS, s = s, oldS-quotient*s
-		// oldT, t = t, oldT - quotient * t
+	if g.Cmp(big.NewInt(1)) != 0 {
+		return nil
 	}
 
-	if oldS < 0 {
-		return uint64(oldS + int64(b))
-	}
-	return uint64(oldS)
+	return x.Mod(x, b)
 }
 
 func generateKey() Key {
-	// NOTE: weird behavoir occurs when bitSize is set to 32,
-	//       decryption is not correct.
-	p, q := generatePrimePair(24, 1e4)
+	p, q := generatePrimePair(256, 1e9)
 
-	n := p * q
-	mod := lcm(p-1, q-1)
+	n := new(big.Int).Mul(p, q)
 
-	// common values for e: 3, 5, 17, 65537 (2**16 + 1)
-	e := uint64(65537)
-	assert(1 < e && e < mod, "e should be in this interval")
-	assert(gcd(e, mod) == 1, "e and m should be coprime (no common multiples other than 1)")
+	pMinusOne := new(big.Int).Sub(p, big.NewInt(1))
+	qMinusOne := new(big.Int).Sub(q, big.NewInt(1))
 
-	d := extendedGcd(e, mod)
-	assert(d >= 0, "d should not be a negative number")
+	mod := lcm(pMinusOne, qMinusOne)
 
-	key := Key{}
+	eBigInt := big.NewInt(e)
 
-	key.n = n
-	key.d = d
+	assert(eBigInt.Cmp(big.NewInt(1)) > 0 && eBigInt.Cmp(mod) < 0, "e should be in this interval")
+	assert(gcd(eBigInt, mod).Cmp(big.NewInt(1)) == 0, "e and m should be coprime (no common multiples other than 1)")
 
-	return key
-}
+	d := new(big.Int).ModInverse(eBigInt, mod)
+	assert(d != nil, "Modular inverse does not exist")
 
-func bigIntExpMod(base big.Int, exp uint64, mod uint64) *big.Int {
-	return base.Exp(&base, new(big.Int).SetUint64(exp), new(big.Int).SetUint64(mod))
+	return Key{
+		n: n,
+		d: d,
+	}
 }
 
 const paddedPlainTextSize = 6
@@ -147,7 +113,7 @@ func padPlainTextMessage(msg string) []byte {
 }
 
 func unpadPlainTextMessage(msg []byte) string {
-	assert(len(msg) == paddedPlainTextSize, fmt.Sprintf("The padded message should be %v chars long\n", paddedPlainTextSize))
+	// assert(len(msg) == paddedPlainTextSize, fmt.Sprintf("The padded message should be %v chars long\n", paddedPlainTextSize))
 	for i := paddedPlainTextSize - 1; i >= 0; i-- {
 		if msg[i] == '\x00' {
 			msg = msg[0:i]
@@ -166,13 +132,13 @@ func (p Person) encryptMessage(receiverName string) (EncryptedMessage, bool) {
 
 	m := new(big.Int)
 	m.SetBytes(paddedMsg)
-	assert(0 <= m.Cmp(big.NewInt(0)) && m.Cmp(new(big.Int).SetUint64(nReceiver)) < 0, "m should be in this interval")
+	assert(m.Cmp(big.NewInt(0)) >= 0 && m.Cmp(nReceiver) < 0, "m should be in this interval")
 
-	c := bigIntExpMod(*m, e, nReceiver)
-	s := bigIntExpMod(*m, p.key.d, p.key.n)
+	c := new(big.Int).Exp(m, big.NewInt(e), nReceiver)
+	s := new(big.Int).Exp(m, p.key.d, p.key.n)
 
 	return EncryptedMessage{
-		c:         new(big.Int).Set(c),
+		c:         c,
 		signature: s,
 		sender:    p.name,
 	}, true
@@ -182,14 +148,14 @@ func (p Person) decryptMessage() (string, bool) {
 	assert(len(p.messagesReceived) >= 1, "p should always have a message if this method has been called")
 	encMsg := p.messagesReceived[0]
 
-	m := bigIntExpMod(*encMsg.c, p.key.d, p.key.n)
+	m := new(big.Int).Exp(encMsg.c, p.key.d, p.key.n)
 
 	nSender, ok := p.pubKeys[encMsg.sender]
 	if !ok {
 		return "", false
 	}
 
-	s := bigIntExpMod(*encMsg.signature, e, nSender)
+	s := new(big.Int).Exp(encMsg.signature, big.NewInt(e), nSender)
 
 	if s.Cmp(m) != 0 {
 		return "", false
@@ -205,22 +171,22 @@ func main() {
 
 	a := Person{
 		name:             "Alice",
-		message:          "Hi Bob", // Max char size is 6
+		message:          "Hi Bob",
 		messagesReceived: make([]EncryptedMessage, 0),
 		key:              generateKey(),
-		pubKeys:          make(map[string]uint64),
+		pubKeys:          make(map[string]*big.Int),
 	}
 
 	b := Person{
 		name:             "Bob",
-		message:          "Wasup!", // Max char size is 6
+		message:          "In the beginning God created the heavens and the earth.",
 		messagesReceived: make([]EncryptedMessage, 0),
 		key:              generateKey(),
-		pubKeys:          make(map[string]uint64),
+		pubKeys:          make(map[string]*big.Int),
 	}
 
-	fmt.Printf("%v: n=%v e=%v d=%v - %v\n", a.name, a.key.n, e, a.key.d, a.message)
-	fmt.Printf("%v: n=%v e=%v d=%v - %v\n", b.name, b.key.n, e, b.key.d, b.message)
+	fmt.Printf("%v:\n\tn=%v\n\te=%v\n\td=%v\n\tmsg=%v\n", a.name, a.key.n, e, a.key.d, a.message)
+	fmt.Printf("%v:\n\tn=%v\n\te=%v\n\td=%v\n\tmsg=%v\n", b.name, b.key.n, e, b.key.d, b.message)
 
 	//////////////////////////////////
 	// key distribution
@@ -229,17 +195,39 @@ func main() {
 	b.pubKeys[a.name] = a.transmitPublicKey()
 
 	//////////////////////////////////
-	// encrypction
+	// encryption
 
-	encMsg, ok := a.encryptMessage(b.name)
-	if !ok {
-		fmt.Println("Enctryption of message failed")
-		return
+	{
+		encMsg, ok := b.encryptMessage(a.name)
+		if !ok {
+			fmt.Println("Encryption of message failed")
+			return
+		}
+		a.messagesReceived = append(a.messagesReceived, encMsg)
 	}
-	b.messagesReceived = append(b.messagesReceived, encMsg)
+
+	{
+		encMsg, ok := a.encryptMessage(b.name)
+		if !ok {
+			fmt.Println("Encryption of message failed")
+			return
+		}
+		b.messagesReceived = append(b.messagesReceived, encMsg)
+	}
 
 	//////////////////////////////////
 	// decryption
+
+	for range a.messagesReceived {
+		decMsg, ok := a.decryptMessage()
+		if !ok {
+			fmt.Println("Decryption of message failed")
+			return
+		}
+		fmt.Println("Decrypted message:", decMsg)
+
+		a.messagesReceived = a.messagesReceived[1:]
+	}
 
 	for range b.messagesReceived {
 		decMsg, ok := b.decryptMessage()
